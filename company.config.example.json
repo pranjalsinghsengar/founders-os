@@ -1,0 +1,61 @@
+{
+  "model": "REPLACE_WITH_YOUR_MODEL_ID",
+  "max_output_tokens": 2000,
+  "max_rounds": 6,
+  "employees": {
+    "planner": {
+      "skills": ["skills/planner.md"],
+      "run_cost_units": 10
+    },
+    "researcher": {
+      "skills": [
+        "skills/researcher.md"
+      ],
+      "run_cost_units": 20
+    },
+    "developer": {
+      "skills": [
+        "skills/developer.md"
+      ],
+      "run_cost_units": 20
+    },
+    "designer": {
+      "skills": [
+        "skills/designer.md"
+      ],
+      "run_cost_units": 20
+    },
+    "product_manager": {
+      "skills": [
+        "skills/product_manager.md"
+      ],
+      "run_cost_units": 20
+    },
+    "qa": {
+      "skills": [],
+      "run_cost_units": 10
+    }
+  },
+  "mcp_servers": [
+    {
+      "name": "local",
+      "command": "REPLACE_WITH_ABSOLUTE_VENV_PYTHON_PATH",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH_TO_sample_mcp_server.py"
+      ],
+      "env_names": [],
+      "allow_tools": {
+        "inspect_workflow": {
+          "cost_units": 1
+        }
+      }
+    }
+  ],
+  "planning_cost_units": 10,
+  "qa_run_cost_units": 10,
+  "executable_qa": {},
+  "research_cost_units": 30,
+  "proposal_cost_units": 20,
+  "research_max_search_calls": 4,
+  "research_max_output_tokens": 6000
+}

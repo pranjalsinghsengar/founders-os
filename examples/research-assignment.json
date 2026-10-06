@@ -1,0 +1,15 @@
+{
+  "objective": "Discover recurring workflow problems faced by small service businesses. Compare opportunities before selecting one; do not assume an invoicing product.",
+  "acceptance_criteria": [
+    "Compare at least three observed customer problems using dated, attributable sources",
+    "Separate observations, inferences and assumptions; disclose absent customer validation",
+    "Recommend one bounded validation experiment with costs, risks, success metrics and stop criteria"
+  ],
+  "context": {
+    "initial_market": "Small service businesses",
+    "allowed_activity": "Public-source desk research only",
+    "excluded_activity": ["Contact prospects", "Send campaigns", "Purchase services", "Deploy products"],
+    "approval_boundary": "Product development requires separate founder investment approval",
+    "evidence_requirement": "No fabricated interviews, demand, revenue or market size"
+  }
+}
