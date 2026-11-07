@@ -19,6 +19,11 @@ def serve_next(db,config,port=3000,open_browser=False):
  initialize(db,config)
  token=secrets.token_urlsafe(48)
  server=DashboardServer(db,config,0,bridge_token=token)
+ from core import Company
+ c=Company(db)
+ try:
+  c.db.execute("INSERT OR REPLACE INTO runtime_settings(key,value) VALUES ('dashboard_origin',?)",(f'http://127.0.0.1:{port}',))
+ finally:c.db.close()
  thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
  env=dict(os.environ)
  env.update({'COMPANY_API_ORIGIN':server.origin,'COMPANY_BRIDGE_TOKEN':token,

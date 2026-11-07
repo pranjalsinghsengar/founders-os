@@ -13,6 +13,15 @@ class PolicyError(Exception):
 class ToolFailure(Exception):
     """Fixed diagnostics only: never persist arbitrary exception/provider text."""
     REASONS = {
+        'cli_missing': 'Codex CLI not found; run init --no-serve --ai codex to detect and save its executable',
+        'cli_execution': 'Codex CLI failed; check local CLI login and account access. Raw diagnostics withheld',
+        'cli_timeout': 'Codex CLI timed out; no automatic retry; reconcile before retrying',
+        'cli_invalid_response': 'Codex CLI returned an invalid answer or unauthorized action',
+        'cli_research_unavailable': 'Codex CLI research evidence adapter is not connected; no API fallback was performed', 
+        'worker_round_limit': 'Worker reached its configured model round limit; saved files remain unreviewed. Inspect them before a bounded local retry',
+        'mcp_schema': 'Tool arguments did not match the permitted MCP schema',
+        'workspace_path': 'Workspace rejected the requested path or file type; use permitted relative product files',
+        'mcp_tool': 'MCP tool reported failure; inspect saved worker response and reconcile before retrying',
         'api_400': 'OpenAI rejected request parameters; check model/tool compatibility',
         'api_401': 'OpenAI credential rejected; check the local key',
         'api_403': 'OpenAI access denied; check project permissions',
@@ -109,6 +118,22 @@ class Company:
                 self.db.execute("UPDATE projects SET approved=1 WHERE id=?", (project,))
                 self.event("proposal.approved.local", project=project, digest=digest)
 
+    def increase_budget(self, project, amount, expected_budget):
+        """Explicit trusted-founder amendment; never changes scope or resumes work."""
+        if type(amount) is not int or not 1 <= amount <= 100000 or type(expected_budget) is not int:
+            raise ValueError('Positive internal-unit increase and current budget required')
+        with self.transaction():
+            row=self.db.execute('SELECT * FROM projects WHERE id=?',(project,)).fetchone()
+            if not row or not row['approved']:raise PolicyError('Budget amendment requires an approved project')
+            if row['budget'] != expected_budget:raise PolicyError('Budget changed; refresh before confirming')
+            if row['budget'] + amount > 100000:raise PolicyError('Internal budget limit is 100000 units')
+            if self.db.execute("SELECT 1 FROM trash WHERE kind='project' AND target=?",(project,)).fetchone():raise PolicyError('Restore the project before changing budget')
+            if self.db.execute("SELECT 1 FROM tasks WHERE project=? AND status='running'",(project,)).fetchone():raise PolicyError('Wait for active work before changing budget')
+            self.db.execute('UPDATE projects SET budget=budget+? WHERE id=?',(amount,project))
+            self.event('budget.amended.local',project=project,previous=row['budget'],increase=amount,
+                       budget=row['budget']+amount,proposal_digest=row['digest'])
+        return {'budget':row['budget']+amount,'remaining':row['budget']+amount-row['spent']}
+
     def pause(self, project, paused=True):
         with self.transaction():
             if not paused and self.db.execute("SELECT 1 FROM trash WHERE kind='project' AND target=?",(project,)).fetchone():
@@ -183,6 +208,16 @@ class Company:
                 raise ValueError("Tool must return artifact and evidence")
             encoded = json.dumps(output)
         except Exception as error:
+            # AnyIO may wrap a known tool failure when closing stdio sessions.
+            # Unwrap only groups whose leaves share one fixed, redacted diagnostic.
+            leaves = []
+            def collect(exc):
+                if isinstance(exc, BaseExceptionGroup):
+                    for child in exc.exceptions: collect(child)
+                else: leaves.append(exc)
+            collect(error)
+            if leaves and all(isinstance(e, ToolFailure) for e in leaves) and len({e.code for e in leaves}) == 1:
+                error = leaves[0]
             reason = str(error) if isinstance(error, ToolFailure) else 'Tool failed; reconcile before retry'
             code = error.code if isinstance(error, ToolFailure) else 'unclassified'
             with self.transaction():

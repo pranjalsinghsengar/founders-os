@@ -5,7 +5,8 @@ import os
 import sys
 from pathlib import Path
 from core import Company, PolicyError, ToolFailure
-from integrations import MCPConnections, OpenAIResponses
+from integrations import MCPConnections
+from codex_runtime import make_model
 from worker import Employee
 from qa import run_review
 from orchestration import generate_plan, install_plan, run_ready
@@ -20,20 +21,20 @@ def execute_employee(c, task, cfg, config_path):
     if row is None or row['owner'] not in cfg['employees']:
         raise PolicyError('Unknown task or unconfigured employee role')
     role = cfg['employees'][row['owner']]
-    model = OpenAIResponses(cfg['model'], max_output_tokens=cfg.get('max_output_tokens', 2000))
+    model = make_model(cfg, max_output_tokens=cfg.get('max_output_tokens', 2000))
     granted = {r[0] for r in c.db.execute('SELECT tool FROM grants WHERE project=? AND role=?',(row['project'],row['owner']))}
     # Start only explicitly granted configured connections, not unrelated fixtures.
     servers = [s for s in cfg.get('mcp_servers', []) if any(g.startswith(s['name'] + '/') for g in granted)]
     if any(g.startswith('workspace/') for g in granted):
         get_workspace(c,row['project'])
         servers.append({'name':'workspace','command':sys.executable,
-                        'args':[str(Path(__file__).parent/'workspace_mcp_server.py'),'--db',str(Path(c.db.execute('PRAGMA database_list').fetchone()[2]).resolve()),'--task',task],
+                        'args':[str(Path(__file__).parent/'workspace_mcp_server.py'),'--db',str(Path(c.db.execute('PRAGMA database_list').fetchone()[2]).resolve()),'--task',task,'--config',str(config_path)],
                         'allow_tools':{name:{'cost_units':0} for name in TOOLS}})
     async def work(payload):
         async with MCPConnections(servers) as connections:
             skills = [str(config_path.parent / p) for p in role.get('skills', [])]
             return await Employee(c, task, model, connections, row['owner'],
-                config_path.parent / 'artifacts', skills, cfg.get('max_rounds', 6), cfg).run(payload)
+                config_path.parent / 'artifacts', skills, role.get('max_rounds',cfg.get('max_rounds', 6)), cfg).run(payload)
     c.register_tool(row['tool'], lambda payload: asyncio.run(work(payload)), role['run_cost_units'])
     return c.execute(task)
 
@@ -43,6 +44,18 @@ def main():
     parser.add_argument("--db", default="company.db")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser('ai-discover', help='Detect local AI CLI installations without model calls')
+    verify=commands.add_parser('ai-verify',help='Perform one live harmless request using the selected model runtime')
+    verify.add_argument('--config',default='company.config.json')
+    p=commands.add_parser('failure-notify')
+    p.add_argument('notification')
+    p.add_argument('--config',default='company.config.json')
+    p=commands.add_parser('retry-autonomy')
+    p.add_argument('workflow')
+    p.add_argument('--config',default='company.config.json')
+    p=commands.add_parser('increase-budget')
+    p.add_argument('project')
+    p.add_argument('--amount',type=int,required=True)
+    p.add_argument('--expected-budget',type=int,required=True)
     p = commands.add_parser('export-project', help='Package actual product source and verification status')
     p.add_argument('project')
     p.add_argument('--output-dir', default='exports')
@@ -148,7 +161,7 @@ def main():
         p.add_argument('--next', action='store_true', help='Launch the connected Next.js control center')
         p.add_argument('--open', action='store_true', help='Open your browser when run locally')
         if name == 'init':
-            p.add_argument('--ai', choices=('codex','claude'), help='Save local CLI preference; adapters are not yet connected')
+            p.add_argument('--ai', choices=('codex','claude'), help='Select installed Codex CLI runtime (Claude adapter unavailable)')
             p.add_argument('--no-serve', action='store_true', help='Initialize workspace without starting the server')
     commands.add_parser("status")
     commands.add_parser("recover")
@@ -179,6 +192,8 @@ def main():
                     from next_dashboard import serve_next
                     serve_next(args.db,args.config,3000 if args.port==8787 else args.port,args.open)
                 else:serve(args.db,args.config,args.port,args.open)
+        except (PolicyError,ToolFailure) as error:
+            parser.exit(1,str(error)+'\n')
         except OSError as error:
             parser.exit(1,startup_error(error,3000 if args.next and args.port==8787 else args.port))
         return
@@ -186,9 +201,31 @@ def main():
         from local_ai import discover_local_ai
         print(json.dumps({'local_ai': discover_local_ai()}, indent=2))
         return
+    if args.command == 'ai-verify':
+        cfg=json.loads(Path(args.config).read_text())
+        from local_credentials import load_local_credentials
+        if cfg.get('model_runtime','openai_api')=='openai_api':
+            load_local_credentials(args.config)
+        try:
+            response=make_model(cfg).complete('Reply exactly: COMPANY_CLI_OK',[],[])
+        except (PolicyError,ToolFailure,ValueError) as error:
+            parser.exit(1,str(error)+'\n')
+        from quality_gate import text_response
+        print(json.dumps({'runtime':cfg.get('model_runtime','openai_api'),
+                          'verified':text_response(response).strip()=='COMPANY_CLI_OK'}))
+        return
     c = Company(args.db)
     try:
-        if args.command == 'export-project':
+        if args.command == 'increase-budget':
+            print(json.dumps(c.increase_budget(args.project,args.amount,args.expected_budget)))
+        elif args.command == 'failure-notify':
+            from failure_notifications import send_failure
+            config_path=Path(args.config).resolve()
+            print(json.dumps(send_failure(c,args.notification,json.loads(config_path.read_text()),config_path.parent)))
+        elif args.command == 'retry-autonomy':
+            from autonomy import retry_autonomy
+            print(json.dumps(retry_autonomy(c,args.workflow,json.loads(Path(args.config).read_text()))))
+        elif args.command == 'export-project':
             from project_export import export_project
             print(json.dumps(export_project(c,args.project,args.output_dir), indent=2))
         elif args.command == "propose":
@@ -237,7 +274,7 @@ def main():
                 if prior:
                     mode = json.loads(prior['output'] or '{}').get('research_mode',json.loads(prior['payload']).get('research_mode','normal'))
             profile = research_profile(cfg, mode or 'normal')
-            model = OpenAIResponses(cfg['model'], max_output_tokens=profile['max_output_tokens'])
+            model = make_model(cfg, max_output_tokens=profile['max_output_tokens'])
             root = config_path.parent / 'artifacts'
             if args.command == 'rework-research':
                 result = discover(c, model, cfg, root, rework_task=args.task, research_mode=mode)
@@ -299,7 +336,7 @@ def main():
                 result = run_executable_review(c, args.task, checks, config_path.parent / 'artifacts',
                                                cfg.get('qa_run_cost_units', 10))
             else:
-                model = OpenAIResponses(cfg['model'], max_output_tokens=cfg.get('max_output_tokens', 2000))
+                model = make_model(cfg, max_output_tokens=cfg.get('max_output_tokens', 2000))
                 result = run_review(c, args.task, model, config_path.parent / 'artifacts',
                                     cfg.get('qa_run_cost_units', 10))
             print(json.dumps(result))
@@ -313,7 +350,7 @@ def main():
                 from delivery import run_delivery
                 from research_modes import research_profile
                 def model_factory(mode):
-                    return OpenAIResponses(cfg['model'],max_output_tokens=research_profile(cfg,mode)['max_output_tokens'])
+                    return make_model(cfg,max_output_tokens=research_profile(cfg,mode)['max_output_tokens'])
                 def delivery(project):
                     model=model_factory('normal')
                     return run_delivery(c,project,model,cfg,config_path.parent,
@@ -326,7 +363,9 @@ def main():
             cfg = json.loads(config_path.read_text())
             if args.command == 'doctor':
                 # Report presence only; never emit environment values or raw configuration.
-                checks = {'model_configured': bool(cfg.get('model')) and not cfg['model'].startswith('REPLACE'),
+                checks = {'model_runtime': cfg.get('model_runtime','openai_api'),
+                          'cli_installed': bool(__import__('local_ai').resolve_local_ai('codex',cfg.get('codex_executable'))) if cfg.get('model_runtime')=='codex_cli' else None,
+                          'model_configured': bool(cfg.get('model')) and not cfg['model'].startswith('REPLACE'),
                           'model_credential_present': bool(os.environ.get('OPENAI_API_KEY')),
                           'email_approval': 'implemented; requires local Gmail OAuth',
                           'gmail_configured': bool(cfg.get('gmail', {}).get('founder')),
@@ -343,7 +382,7 @@ def main():
             elif args.command == 'apply-plan':
                 print(json.dumps(install_plan(c, args.task, cfg['employees'])))
             else:
-                model = OpenAIResponses(cfg['model'], max_output_tokens=cfg.get('max_output_tokens', 2000))
+                model = make_model(cfg, max_output_tokens=cfg.get('max_output_tokens', 2000))
                 if args.command == 'start-delivery':
                     from delivery import run_delivery
                     checks = cfg.get('executable_qa', {}).get(args.project)

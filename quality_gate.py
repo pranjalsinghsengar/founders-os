@@ -1,5 +1,6 @@
 """Bounded employee self-checks; never substitute for independent review."""
 import json
+import re
 from pathlib import Path
 from core import PolicyError, ToolFailure
 
@@ -29,6 +30,23 @@ def text_response(response):
     if not text.strip():
         raise ToolFailure('missing_deliverable')
     return text
+
+def parse_check(raw, criteria):
+    """Normalize formatting only; preserve the complete semantic acceptance gate."""
+    try:
+        fenced = re.fullmatch(r'\s*```(?:json)?[ \t]*\r?\n(.*?)\r?\n```\s*', raw, re.DOTALL)
+        decision = json.loads(fenced.group(1) if fenced else raw)
+        checks, corrections = decision['checks'], decision['corrections']
+        if (type(decision['ready']) is not bool or not isinstance(checks,list) or
+            not isinstance(corrections,list) or not all(isinstance(c,str) and c.strip() for c in corrections) or
+            [c['criterion'] for c in checks] != criteria or
+            any(type(c['passed']) is not bool or not isinstance(c['evidence'],str) or not c['evidence'].strip() for c in checks) or
+            decision['ready'] != all(c['passed'] for c in checks) or
+            (not decision['ready'] and not corrections)):
+            raise ValueError('Invalid self-check')
+    except (ValueError,KeyError,TypeError):
+        raise ToolFailure('quality_invalid_check') from None
+    return decision
 
 class QualityGate:
     def __init__(self, company, task, model, root, config=None):
@@ -68,21 +86,24 @@ class QualityGate:
         raw = self.call('check',self.settings['check_cost_units'],CHECK_INSTRUCTIONS,
                         {'assignment':assignment,'deliverable':deliverable,'evidence':evidence})
         try:
-            decision = json.loads(raw)
-            checks, corrections = decision['checks'], decision['corrections']
-            if (type(decision['ready']) is not bool or not isinstance(checks,list) or
-                not isinstance(corrections,list) or not all(isinstance(c,str) and c.strip() for c in corrections) or
-                [c['criterion'] for c in checks] != criteria or
-                any(type(c['passed']) is not bool or not isinstance(c['evidence'],str) or not c['evidence'].strip() for c in checks) or
-                decision['ready'] != all(c['passed'] for c in checks) or
-                (not decision['ready'] and not corrections)):
-                raise ValueError('Invalid self-check')
-        except (ValueError,KeyError,TypeError):
-            raise ToolFailure('quality_invalid_check') from None
+            decision = parse_check(raw, criteria)
+        except ToolFailure:
+            # A contradictory positive summary must never permit submission.
+            # Preserve explicit failures and route them to normal corrective work.
+            try:
+                candidate=json.loads(raw)
+                if candidate.get('ready') is not True or not any(c.get('passed') is False for c in candidate.get('checks',[])):
+                    raise ValueError('Not a conservative correction')
+                candidate['ready']=False
+                decision=parse_check(json.dumps(candidate),criteria)
+            except (ValueError,TypeError,AttributeError,ToolFailure):
+                raise ToolFailure('quality_invalid_check') from None
+            self.records[-1]['summary_corrected_to_rejection']=True
+            self.company.event('employee.quality.summary.rejected',task=self.task,reason='Explicit failed criterion overrides positive summary')
         self.records[-1]['decision'] = decision
         self.save()
         self.company.event('employee.quality.checked',task=self.task,ready=decision['ready'],
-                           failed_criteria=sum(not c['passed'] for c in checks))
+                           failed_criteria=sum(not c['passed'] for c in decision['checks']))
         return decision
 
     def improve(self, assignment, deliverable, evidence, format_instructions='Return the complete revised deliverable.'):

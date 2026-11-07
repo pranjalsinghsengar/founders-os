@@ -67,6 +67,39 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotIn(('qa','workspace/write_file'),grants)
         self.assertTrue(all(not tool.startswith('github/') for _,tool in grants))
         self.assertEqual(result['stage'],'release_blocked')
+    def test_known_worker_failure_repairs_automatically_without_founder_retry(self):
+        from core import ToolFailure
+        self.cfg['local_recovery_enabled']=True
+        first=True
+        def execute(task):
+            nonlocal first
+            if first:
+                first=False
+                def failed(_):raise ToolFailure('quality_not_ready')
+                self.c.register_tool('employee.developer',failed,1)
+                return self.c.execute(task)
+            return self.run_work(task)
+        model=Model()
+        result=run_delivery(self.c,self.p,model,self.cfg,self.root,execute,
+            lambda task:run_review(self.c,task,model,self.root/'artifacts',1))
+        self.assertEqual(result['status'],'local_tasks_reviewed')
+        self.assertTrue(any(a['action']=='automatic_recovery' for a in result['actions']))
+        self.assertEqual(self.c.db.execute("SELECT attempts FROM tasks WHERE tool='employee.developer'").fetchone()[0],3)
+    def test_unimplemented_pilot_handoff_stops_before_paid_execution(self):
+        class PilotModel(Model):
+            def complete(self,instructions,history,tools):
+                response=super().complete(instructions,history,tools)
+                if instructions.startswith('Plan only'):
+                    part=response['output'][0]['content'][0];graph=json.loads(part['text'])
+                    graph['tasks'].append({'key':'pilot','role':'product_manager','reviewer':'qa',
+                        'objective':'Manage pilot deployment and collect real usage metrics',
+                        'acceptance_criteria':['Executed pilot evidence'],'dependencies':['build']})
+                    part['text']=json.dumps(graph)
+                return response
+        result=self.run_delivery(PilotModel())
+        self.assertEqual(result['stage'],'pilot_integration')
+        row=self.c.db.execute("SELECT status,attempts FROM tasks WHERE tool='employee.product_manager'").fetchone()
+        self.assertEqual(tuple(row),('queued',0))
     def test_rejected_plan_corrects_same_task_and_preserves_first_artifact(self):
         model=Model(reject_plan=True);result=self.run_delivery(model)
         self.assertEqual(result['status'],'local_tasks_reviewed')

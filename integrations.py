@@ -129,10 +129,22 @@ class MCPConnections:
         await self.stack.aclose()
 
     async def call(self, alias, arguments):
-        from jsonschema import validate
+        from jsonschema import validate, ValidationError
         t = self.tools[alias]
-        validate(arguments, t["schema"])
+        try:
+            validate(arguments, t["schema"])
+        except ValidationError:
+            raise ToolFailure('mcp_schema') from None
         result = await asyncio.wait_for(t["session"].call_tool(t["name"], arguments), 45)
         if result.isError:
-            raise RuntimeError("MCP tool reported failure")
+            # Match only fixed workspace policy diagnostics; arbitrary MCP error
+            # text can contain credentials and must never enter events/UI.
+            messages = [getattr(block,'text','') for block in result.content]
+            path_errors = ('Unsupported product file or path outside workspace',
+                           'Hidden files and traversal are prohibited',
+                           'Relative product file required','Workspace symlinks are prohibited')
+            if t['canonical'].startswith('workspace/') and any(
+                    message.endswith(reason) for message in messages for reason in path_errors):
+                raise ToolFailure('workspace_path')
+            raise ToolFailure('mcp_tool')
         return result.model_dump(mode="json", by_alias=True, exclude_none=True)

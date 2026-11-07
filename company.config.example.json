@@ -2,9 +2,18 @@
   "model": "REPLACE_WITH_YOUR_MODEL_ID",
   "max_output_tokens": 2000,
   "max_rounds": 6,
+  "local_recovery_enabled": false,
   "employees": {
+    "repair_engineer": {
+      "skills": [
+        "skills/repair_engineer.md"
+      ],
+      "run_cost_units": 20
+    },
     "planner": {
-      "skills": ["skills/planner.md"],
+      "skills": [
+        "skills/planner.md"
+      ],
       "run_cost_units": 10
     },
     "researcher": {
@@ -57,5 +66,8 @@
   "research_cost_units": 30,
   "proposal_cost_units": 20,
   "research_max_search_calls": 4,
-  "research_max_output_tokens": 6000
+  "research_max_output_tokens": 6000,
+  "model_runtime": "openai_api",
+  "codex_timeout_seconds": 180,
+  "project_changes_autonomous": false
 }

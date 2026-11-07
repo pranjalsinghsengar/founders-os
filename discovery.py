@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from core import PolicyError, ToolFailure
 from research_modes import research_profile
-from quality_gate import QualityGate, quality_settings
+from quality_gate import QualityGate, quality_settings, parse_check, text_response
 
 SECTIONS = ('customer_problem', 'evidence', 'competitors', 'demand_validation',
             'positioning', 'mvp_scope', 'pricing_acquisition', 'feasibility_risks',
@@ -158,6 +158,84 @@ def discover(company, model, config, artifact_dir, budget=100,
     if status == 'failed':
         result['reason'] = company.db.execute('SELECT note FROM tasks WHERE id=?',(task,)).fetchone()[0]
     return result
+
+
+def reconcile_saved_research(company, task, artifact_dir):
+    """Recover a completed first self-check formatting failure, without model calls.
+
+    No interrupted requests, failed checks, revisions or other failures qualify.
+    This restores submission only, never independent acceptance.
+    """
+    root = Path(artifact_dir).resolve()
+    with company.transaction():
+        row = company.db.execute('SELECT * FROM tasks WHERE id=?', (task,)).fetchone()
+        if not row or row['tool'] != 'research.web_search' or row['status'] != 'failed':
+            return False
+        failure = company.db.execute("SELECT details FROM events WHERE kind='tool.failed' AND json_extract(details,'$.task')=? ORDER BY id DESC LIMIT 1", (task,)).fetchone()
+        if not failure or json.loads(failure[0]).get('failure_code') != 'quality_invalid_check':
+            return False
+        project = company.db.execute('SELECT approved,paused FROM projects WHERE id=?',(row['project'],)).fetchone()
+        if not project['approved'] or project['paused'] or company.db.execute(
+                "SELECT 1 FROM trash WHERE kind='project' AND target=?",(row['project'],)).fetchone():
+            return False
+        assignment = json.loads(row['payload'])
+        criteria = assignment.get('acceptance_criteria')
+        if not isinstance(criteria,list) or not criteria or not all(isinstance(v,str) and v.strip() for v in criteria):
+            return False
+        attempt = row['attempts']
+        name = task if attempt == 1 else task + '.attempt-' + str(attempt)
+        quality_base = task + '.attempt-' + str(attempt) + '.quality'
+        def read(suffix):
+            path = root / suffix
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 5000000:
+                raise ValueError('Missing or unsafe checkpoint')
+            return path.read_text()
+        try:
+            audit = json.loads(read(quality_base + '.json'))
+            records = audit['checks_and_revisions']
+            check_path = root / (quality_base + '.1.check.json')
+            if len(records) != 1 or records[0]['phase'] != 'check' or records[0]['response_artifact'] != str(check_path):
+                return False
+            check = json.loads(read(check_path.name))
+            raw = text_response(check)
+            # Only the specific formatting fault qualifies, not any malformed JSON.
+            if not raw.strip().startswith('```'):
+                return False
+            decision = parse_check(raw, criteria)
+            if not decision['ready']:
+                return False
+            response = json.loads(read(name + '.response.json'))
+            text = response_text(response)
+            if read(name + '.draft.md') != text:
+                return False
+            urls = source_urls(response)
+            if len(urls) < 3:
+                return False
+        except (OSError,ValueError,KeyError,TypeError,ToolFailure):
+            return False
+        # Dedicated recovery artifacts preserve the original failed audit verbatim.
+        brief = root / (name + '.reconciled.md')
+        evidence = root / (name + '.reconciled.evidence.json')
+        for path in (brief,evidence):
+            if path.is_symlink():
+                raise PolicyError('Recovery artifact symlinks are prohibited')
+        brief.write_text(text + '\n\nSources returned by search (claim relevance requires review):\n' +
+                         '\n'.join('- [' + u + '](' + u + ')' for u in urls))
+        evidence.write_text(json.dumps({'provider':'OpenAI Responses web_search','response':response,
+            'source_urls':urls,'recovered_quality_decision':decision,
+            'original_quality_artifact':str(root / (quality_base + '.json')),
+            'verification':'Saved provider response recovered after formatting fix; independent review pending'},indent=2))
+        output = {'artifact':str(brief),'evidence':str(evidence),'sources':urls,'brief':text,
+                  'kind':'research','research_mode':assignment.get('research_mode','normal'),
+                  'quality_status':'Saved self-check passed; independent review pending',
+                  'verification':'Pending independent review'}
+        company.db.execute("UPDATE tasks SET status='awaiting_review',output=?,note=? WHERE id=?",
+            (json.dumps(output),'Recovered saved self-check formatting; independent review pending',task))
+        company.event('research.formatting.reconciled',task=task,attempt=attempt,
+            response_sha256=hashlib.sha256(json.dumps(response,sort_keys=True).encode()).hexdigest(),
+            check_sha256=hashlib.sha256(json.dumps(check,sort_keys=True).encode()).hexdigest())
+        company.event('task.submitted',task=task,recovered=True)
+    return True
 
 
 def validate_proposal(proposal, sources):

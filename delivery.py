@@ -8,7 +8,9 @@ from workspace import setup_market_workspace, TOOLS
 
 LOCAL_ROLES = ('designer','developer','product_manager','qa')
 CAPABILITIES = {
-    'available':['Scoped local Git files: HTML, CSS, JS, JSON, Markdown, text and SVG',
+    'available':['Scoped local Git source files: Python, TS/TSX, JS/JSX, HTML, CSS, TOML, JSON, Markdown, text and SVG',
+                 'Python syntax checks without execution',
+                 'Offline Python unittest containers when a trusted python_test_image is configured and Docker is available',
                  'Model self-checks and independent artifact assessment'],
     'missing':['Isolated package installation/build execution','Native mobile build and device testing',
                'Browser behavior QA','Deployment, monitoring and rollback'],
@@ -119,7 +121,8 @@ def run_delivery(company, project, model, config, root, execute, review,
                 grant(t['owner'],'employee.'+t['owner'])
                 grant(t['reviewer'],'employee.qa')
                 for role in {t['owner'],t['reviewer']}:
-                    names=TOOLS if role==t['owner'] and role in ('developer','designer') else ('read_file','list_files','inspect')
+                    names=TOOLS if role==t['owner'] and role in ('developer','designer','repair_engineer') else ('read_file','list_files','inspect','check_python','test_python')
+                    if role==t['owner'] and role=='qa':names=(*names,'write_qa_file','checkpoint')
                     for name in names:grant(role,'workspace/'+name)
             work=[company.db.execute('SELECT * FROM tasks WHERE id=?',(task,)).fetchone() for task in mapping.values()]
             if all(t['status']=='completed' for t in work):
@@ -127,7 +130,21 @@ def run_delivery(company, project, model, config, root, execute, review,
                     'Local plan tasks passed artifact review; release remains blocked by missing build/browser/deployment capabilities')
             failed=next((t for t in work if t['status']=='failed'),None)
             if failed:
-                return update('blocked','delivery','Employee task failed; inspect saved feedback before retrying')
+                from local_recovery import recover_local
+                recovery=recover_local(company,failed['id'],config,root)
+                if recovery:
+                    actions.append({'action':'automatic_recovery',**recovery})
+                    continue
+                return update('blocked','delivery','Employee task '+failed['id'][:8]+' failed: '+
+                    (failed['note'] or 'Inspect saved feedback before retrying'))
+            # This runtime has no deployment or customer-pilot measurements
+            # adapter. Do not pay a text worker to represent them as executed.
+            for candidate in work:
+                objective=json.loads(candidate['payload']).get('objective','').lower()
+                if candidate['owner']=='product_manager' and candidate['status'] in ('queued','blocked','changes_requested') and any(x in objective for x in ('pilot deployment','pilot results')):
+                    pending=company.db.execute("SELECT 1 FROM dependencies d JOIN tasks t ON t.id=d.dependency WHERE d.task=? AND t.status!='completed'",(candidate['id'],)).fetchone()
+                    if not pending:
+                        return update('blocked','pilot_integration','Next handoff requires live pilot/deployment and usage-metrics integrations that are not connected; no pilot execution or customer contact was started')
             update('running','delivery','AI is assigning, building, reviewing and repairing ready work')
             step=run_ready(company,project,execute,review,max_actions=1)
             if not step:

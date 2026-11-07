@@ -55,3 +55,48 @@ class ControlTests(unittest.TestCase):
    other=Controls(self.db,self.cfg)
    with self.assertRaises(ValueError):other.submit({'action':'doctor'})
   c=Company(self.db);self.assertEqual(c.db.execute('SELECT status FROM dashboard_jobs').fetchone()[0],'queued');c.db.close()
+
+ def test_change_prompt_creates_reviewed_local_task_without_starting_worker(self):
+  p=self.controls.mutate({'action':'create-project','proposal':{'title':'Fixture'},'budget':100})['project']
+  with self.assertRaises(ValueError):self.controls.mutate({'action':'request-project-change','project':p,'prompt':'Add dark mode'})
+  c=Company(self.db);digest=c.db.execute('SELECT digest FROM projects WHERE id=?',(p,)).fetchone()[0];c.approve_local(p,digest);c.db.close()
+  with patch('dashboard_control.subprocess.run') as run:
+   result=self.controls.mutate({'action':'request-project-change','project':p,'prompt':'Add dark mode'})
+   run.assert_not_called()
+  c=Company(self.db);row=c.db.execute('SELECT * FROM tasks WHERE id=?',(result['task'],)).fetchone()
+  self.assertEqual(row['status'],'queued');self.assertEqual(row['reviewer'],'qa')
+  self.assertEqual(json.loads(row['payload'])['founder_prompt'],'Add dark mode')
+  self.assertEqual(c.db.execute('SELECT spent FROM projects WHERE id=?',(p,)).fetchone()[0],0)
+  with self.assertRaises(ValueError):self.controls.mutate({'action':'request-project-change','project':p,'prompt':' '})
+  c.db.execute('UPDATE projects SET paused=1 WHERE id=?',(p,));c.db.close()
+  with self.assertRaises(ValueError):self.controls.mutate({'action':'request-project-change','project':p,'prompt':'Add dark mode'})
+
+ def test_change_retry_preserves_failed_source_and_authorizes_repair(self):
+  p=self.controls.mutate({'action':'create-project','proposal':{'title':'Retry'},'budget':100})['project']
+  c=Company(self.db);digest=c.db.execute('SELECT digest FROM projects WHERE id=?',(p,)).fetchone()[0];c.approve_local(p,digest);c.db.close()
+  task=self.controls.mutate({'action':'request-project-change','project':p,'prompt':'Improve form'})['task']
+  c=Company(self.db);c.db.execute("UPDATE tasks SET status='failed',attempts=1 WHERE id=?",(task,));c.db.close()
+  body={'action':'retry-project-change','project':p,'task':task,'confirmed':True}
+  with self.assertRaises(ValueError):self.controls.mutate({**body,'confirmed':False})
+  with patch('local_recovery.recover_local',return_value=None):
+   with self.assertRaisesRegex(ValueError,'Retry blocked'):self.controls.mutate(body)
+  def repair(company,source,config,root):
+   replacement='repair-fixture'
+   company.db.execute('INSERT INTO tasks(id,project,owner,reviewer,tool,payload,max_attempts) VALUES (?,?,?,?,?,?,2)',(replacement,p,'developer','qa','employee.developer',json.dumps({'kind':'founder_change','repair_of':source})))
+   return {'task':replacement,'strategy':'repair'}
+  with patch('local_recovery.recover_local',side_effect=repair):result=self.controls.mutate(body)
+  c=Company(self.db)
+  self.assertEqual(c.db.execute('SELECT status,attempts FROM tasks WHERE id=?',(task,)).fetchone()[:],('failed',1))
+  payload=json.loads(c.db.execute('SELECT payload FROM tasks WHERE id=?',(result['task'],)).fetchone()[0]);self.assertTrue(payload['autonomous']);c.db.close()
+
+ def test_cli_failure_manual_retry_preserves_attempts_and_limits(self):
+  p=self.controls.mutate({'action':'create-project','proposal':{'title':'CLI retry'},'budget':100})['project']
+  c=Company(self.db);digest=c.db.execute('SELECT digest FROM projects WHERE id=?',(p,)).fetchone()[0];c.approve_local(p,digest);c.grant(p,'developer','employee.developer');c.db.close()
+  task=self.controls.mutate({'action':'request-project-change','project':p,'prompt':'Improve form'})['task']
+  c=Company(self.db);c.db.execute("UPDATE tasks SET status='failed',attempts=1 WHERE id=?",(task,));c.event('tool.failed',task=task,failure_code='cli_execution');c.db.close()
+  result=self.controls.mutate({'action':'retry-project-change','project':p,'task':task,'confirmed':True})
+  self.assertEqual(result['task'],task)
+  c=Company(self.db);row=c.db.execute('SELECT status,attempts,payload FROM tasks WHERE id=?',(task,)).fetchone()
+  self.assertEqual(row['status'],'changes_requested');self.assertEqual(row['attempts'],1);self.assertTrue(json.loads(row['payload'])['autonomous'])
+  c.db.execute("UPDATE tasks SET status='failed',attempts=max_attempts WHERE id=?",(task,));c.db.close()
+  with self.assertRaisesRegex(ValueError,'exhausted its attempts'):self.controls.mutate({'action':'retry-project-change','project':p,'task':task,'confirmed':True})

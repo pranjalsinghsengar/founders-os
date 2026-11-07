@@ -292,13 +292,24 @@ class EmailApprovals:
         text = body.get_content() if body else (msg.get_content() if msg.get_content_type() == 'text/plain' else '')
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         first = lines[0] if lines else ''
-        # Gmail can hard-wrap the 109-character command before the binding.
-        # Only this exact two-line shape is accepted; never search quoted mail.
-        if (re.fullmatch(r'(APPROVE|REJECT|CHANGES) [a-f0-9-]{36}',first) and
-            len(lines)>1 and re.fullmatch(r'[a-f0-9]{64}',lines[1])):
-            first += ' ' + lines[1]
+        # Gmail can hard-wrap before or inside the binding token. Fold only
+        # adjacent hexadecimal fragments of that token, never quoted mail/prose.
+        prefix = re.fullmatch(r'(APPROVE|REJECT|CHANGES) ([a-f0-9-]{36})(?: ([a-f0-9]{1,64}))?',first)
+        if prefix:
+            binding = prefix[3] or ''
+            for fragment in lines[1:4]:
+                if len(binding) >= 64 or not re.fullmatch(r'[a-f0-9]{1,64}',fragment):
+                    break
+                binding += fragment
+            first = prefix[1] + ' ' + prefix[2] + ' ' + binding
         command = re.fullmatch(r'(APPROVE|REJECT|CHANGES) ([a-f0-9-]{36}) ([a-f0-9]{64})', first)
         if not command or command[2] != request:
+            if prefix and prefix[2] == request:
+                code = 'incomplete_command' if len(binding) < 64 else 'invalid_command'
+                # Store a fixed diagnostic once per authenticated message, never its body/token.
+                if not self.company.db.execute("SELECT 1 FROM events WHERE kind='approval.email.reply.invalid' AND json_extract(details,'$.message')=? AND json_extract(details,'$.request')=?",
+                                               (item['id'],request)).fetchone():
+                    self.company.event('approval.email.reply.invalid',request=request,message=item['id'],code=code)
             return None
         c = self.company
         with c.transaction():

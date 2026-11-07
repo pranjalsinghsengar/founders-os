@@ -30,7 +30,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(len(result['commit']),40)
         self.assertEqual(result['branch'],'product')
         self.assertEqual(setup_workspace(self.c,self.p,self.root/'workspaces')['status'],'existing')
-        for name in ('../outside.json','.env','.git/config','/tmp/file.md','nested/../../file.html','server.py'):
+        for name in ('../outside.json','.env','.git/config','/tmp/file.md','nested/../../file.html','server.exe'):
             with self.assertRaises(PolicyError):self.w.write_file(name,'fixture')
         outside=self.root/'outside.txt';outside.write_text('private fixture')
         (self.w.root/'link.txt').symlink_to(outside)
@@ -80,6 +80,30 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.c.execute(task),'awaiting_review')
         self.assertTrue((self.w.root/'index.html').is_file())
         self.assertEqual(self.w.inspect()['branch'],'product')
+    def test_denied_write_retains_response_and_fixed_error_through_stdio_cleanup(self):
+        class Model:
+            def complete(self,instructions,history,tools):
+                name=next(t['name'] for t in tools if 'Create or replace' in t['description'])
+                return {'status':'completed','output':[{'type':'function_call','name':name,
+                    'call_id':'denied-write','arguments':json.dumps({'path':'backend/storage.exe','content':'fixture'})}]}
+        self.c.grant(self.p,'developer','employee.developer')
+        self.c.grant(self.p,'developer','workspace/write_file')
+        task=self.c.task(self.p,'developer','qa','employee.developer',{'acceptance_criteria':['Write fixture']})
+        artifacts=self.root/'artifacts'
+        async def work(payload):
+            server={'name':'workspace','command':sys.executable,
+                'args':[str(Path(__file__).parent.resolve()/'workspace_mcp_server.py'),'--db',str(self.root/'db'),'--task',task],
+                'allow_tools':{'write_file':{'cost_units':0}}}
+            async with MCPConnections([server]) as connections:
+                return await Employee(self.c,task,Model(),connections,'developer',artifacts).run(payload)
+        self.c.register_tool('employee.developer',lambda payload:asyncio.run(work(payload)))
+        self.assertEqual(self.c.execute(task),'failed')
+        row=self.c.db.execute('SELECT note FROM tasks WHERE id=?',(task,)).fetchone()
+        self.assertIn('path or file type',row['note'])
+        checkpoint=artifacts/(task+'.attempt-1.round-1.response.json')
+        self.assertTrue(checkpoint.is_file());self.assertEqual(checkpoint.stat().st_mode & 0o777,0o600)
+        response=json.loads(checkpoint.read_text())
+        self.assertEqual(json.loads(response['output'][0]['arguments'])['path'],'backend/storage.exe')
     def test_registered_root_symlink_cannot_redirect_file_access(self):
         original=self.w.root
         renamed=original.with_name(original.name+'-saved')

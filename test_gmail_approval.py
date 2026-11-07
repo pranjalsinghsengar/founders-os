@@ -2,6 +2,7 @@ import base64
 import json
 import tempfile
 import unittest
+from gmail_approval import decode
 from email.message import EmailMessage
 from pathlib import Path
 from core import Company, PolicyError
@@ -61,6 +62,37 @@ class EmailTests(unittest.TestCase):
         self.gateway = EmailApprovals(self.c, self.gmail, lambda:self.clock)
         self.assertIsNone(self.gateway.consume(self.request,item))
         self.assertEqual(self.c.db.execute('SELECT COUNT(*) FROM email_decisions').fetchone()[0],1)
+    def test_gmail_wrap_inside_binding_is_accepted(self):
+        item=self.reply()
+        msg=decode(item)
+        binding=self.c.db.execute('SELECT binding FROM email_requests WHERE id=?',(self.request,)).fetchone()[0]
+        msg.set_content('APPROVE '+self.request+' '+binding[:30]+'\n'+binding[30:]+'\n\n> quoted request')
+        item['raw']=base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        self.assertEqual(self.gateway.consume(self.request,item),'APPROVE')
+        self.assertEqual(self.approved(),1)
+    def test_truncated_command_has_fixed_diagnostic_and_never_approves(self):
+        item=self.reply();msg=decode(item)
+        binding=self.c.db.execute('SELECT binding FROM email_requests WHERE id=?',(self.request,)).fetchone()[0]
+        msg.set_content('APPROVE '+self.request+' '+binding[:30])
+        item['raw']=base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        self.assertIsNone(self.gateway.consume(self.request,item))
+        self.assertIsNone(self.gateway.consume(self.request,item))
+        self.assertEqual(self.approved(),0)
+        events=self.c.db.execute("SELECT details FROM events WHERE kind='approval.email.reply.invalid'").fetchall()
+        self.assertEqual(len(events),1)
+        self.assertEqual(json.loads(events[0][0])['code'],'incomplete_command')
+        self.assertNotIn(binding[:30],events[0][0])
+    def test_wrapped_binding_mismatch_or_quoted_fragment_is_rejected(self):
+        for fragment in ('0'*34,'> quoted token fragment'):
+            item=self.reply();msg=decode(item)
+            binding=self.c.db.execute('SELECT binding FROM email_requests WHERE id=?',(self.request,)).fetchone()[0]
+            msg.set_content('APPROVE '+self.request+' '+binding[:30]+'\n'+fragment)
+            item['raw']=base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            if fragment.startswith('>'):
+                self.assertIsNone(self.gateway.consume(self.request,item))
+            else:
+                with self.assertRaises(PolicyError):self.gateway.consume(self.request,item)
+        self.assertEqual(self.approved(),0)
     def test_spoofed_inbox_or_wrong_sender_or_thread(self):
         for item in (self.reply(labels=['INBOX']), self.reply(sender='attacker@example.com'),
                      self.reply(thread='different'), self.reply(binding='0'*64)):

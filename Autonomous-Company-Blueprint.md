@@ -2,6 +2,12 @@
 
 Version 2 · 3 October 2026 · Founder: Pranjal Sengar
 
+7 October backend checkpoint: scoped source writes now include Python and
+TypeScript. Offline Python unittest execution is available through a trusted
+operator-configured Docker image. Source snapshots omit company credentials and
+tests receive no network access. Syntax and functional test evidence remain
+distinct from model reviews and complete product/release certification.
+
 6 October checkpoint: opt-in idea workflows now schedule the research-to-proposal
 handoffs and authenticated Gmail decision monitoring. Accepted investment
 decisions advance to bounded local delivery automatically; action-limit pauses
@@ -27,8 +33,9 @@ end-to-end product launch.
 Distribution target: founders download the orchestration application from GitHub
 and run it locally. Setup detects installed AI CLIs (initially Codex and Claude),
 offers a provider choice and should reuse each provider's local authentication.
-CLI detection and preference storage are implemented; worker adapters and
-authentication verification remain required. Current workers use the OpenAI API.
+CLI detection and Codex employee/planner/review execution are implemented.
+Codex reuses local authentication; verify with `ai-verify`. Claude and Codex
+research evidence adapters remain missing. The API runtime remains selectable.
 Generated products live in separate market/project workspaces. Source exports
 include code and verification metadata; a package is only considered final after
 its required build, executable QA and release gates pass.

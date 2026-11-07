@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 parser=argparse.ArgumentParser()
 parser.add_argument('--db',required=True)
 parser.add_argument('--task',required=True)
+parser.add_argument('--config')
 args=parser.parse_args()
 mcp=FastMCP('Company scoped repository')
 
@@ -43,6 +44,19 @@ def write_file(path:str,content:str) -> dict:
 
 
 @mcp.tool()
+def write_qa_file(path:str,content:str) -> dict:
+    """Write only tests/test_*.py or docs/qa_*.md/json; cannot modify application source."""
+    def write(workspace):
+        try:return workspace.write_qa_file(path,content)
+        except PolicyError as error:
+            if str(error)!='QA writes require tests/test_*.py or docs/qa_*.md/json; application source is read-only':raise
+            return {'written':False,'error':'qa_artifact_path',
+                    'allowed_paths':['tests/test_*.py','docs/qa_*.md','docs/qa_*.json'],
+                    'message':'Choose a permitted QA artifact path; no file was modified'}
+    return invoke('write_qa_file',write)
+
+
+@mcp.tool()
 def checkpoint(message:str) -> dict:
     """Commit permitted product files on the local product branch; no push."""
     return invoke('checkpoint',lambda w:w.checkpoint(message))
@@ -52,6 +66,26 @@ def checkpoint(message:str) -> dict:
 def inspect() -> dict:
     """Return file hashes and branch identity for independently checked evidence."""
     return invoke('inspect',lambda w:w.inspect())
+
+
+@mcp.tool()
+def check_python() -> dict:
+    """Parse Python source for syntax errors; no code execution or security certification."""
+    return invoke('check_python',lambda w:w.check_python())
+
+
+@mcp.tool()
+def test_python() -> dict:
+    """Run tests/test_*.py in a configured isolated offline Docker container; no host credentials."""
+    def run(workspace):
+        import json
+        from pathlib import Path
+        from isolated_python import run_tests
+        config=Path(args.config) if args.config else Path(args.db).resolve().parent/'company.config.json'
+        if not config.is_file():return {'passed':False,'blocker':'Python test image not configured','verification':'Tests not executed'}
+        cfg=json.loads(config.read_text())
+        return run_tests(workspace,cfg.get('python_test_image'))
+    return invoke('test_python',run)
 
 
 if __name__=='__main__':mcp.run(transport='stdio')

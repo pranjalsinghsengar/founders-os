@@ -3,6 +3,7 @@
 Directory isolation is not an OS sandbox. No generated program is executed.
 """
 import hashlib
+import ast
 import json
 import os
 import re
@@ -12,8 +13,8 @@ from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from core import PolicyError
 
-ALLOWED = {'.html','.css','.js','.json','.md','.txt','.svg'}
-TOOLS = ('list_files','read_file','write_file','checkpoint','inspect')
+ALLOWED = {'.html','.css','.js','.jsx','.ts','.tsx','.py','.toml','.json','.md','.txt','.svg'}
+TOOLS = ('list_files','read_file','write_file','write_qa_file','checkpoint','inspect','check_python','test_python')
 
 
 def git(root, *args):
@@ -61,6 +62,9 @@ class Workspace:
         return files
     def read_file(self,path):
         target=self.path(path)
+        if not target.exists():
+            return {'path':path,'exists':False,'error':'file_not_found',
+                    'message':'This permitted product file does not exist; inspect list_files or create it if required by the task'}
         if not target.is_file() or target.stat().st_size>60000:raise PolicyError('File missing or exceeds read limit')
         return {'path':path,'content':target.read_text()}
     def write_file(self,path,content):
@@ -70,12 +74,30 @@ class Workspace:
         target.parent.mkdir(parents=True,exist_ok=True)
         target.write_text(content)
         return {'path':path,'sha256':hashlib.sha256(content.encode()).hexdigest(),'bytes':len(content.encode())}
+    def write_qa_file(self,path,content):
+        self.path(path)
+        pure=PurePosixPath(path)
+        if not ((len(pure.parts)==2 and pure.parts[0]=='tests' and pure.name.startswith('test_') and pure.suffix=='.py') or
+                (len(pure.parts)==2 and pure.parts[0]=='docs' and pure.name.startswith('qa_') and pure.suffix in ('.md','.json'))):
+            raise PolicyError('QA writes require tests/test_*.py or docs/qa_*.md/json; application source is read-only')
+        return self.write_file(path,content)
     def inspect(self):
         files=self.list_files()
         if sum(self.path(f).stat().st_size for f in files)>2000000:raise PolicyError('Workspace exceeds inspection limit')
         return {'files':[{'path':f,'sha256':hashlib.sha256(self.path(f).read_bytes()).hexdigest()} for f in files],
                 'branch':git(self.root,'branch','--show-current'),
                 'verification':'File hashes and repository state; product behavior not verified'}
+    def check_python(self):
+        results=[]
+        for name in self.list_files():
+            if name.endswith('.py'):
+                try:
+                    ast.parse(self.read_file(name)['content'],filename=name)
+                    results.append({'path':name,'passed':True})
+                except SyntaxError as error:
+                    results.append({'path':name,'passed':False,'line':error.lineno})
+        return {'passed':bool(results) and all(r['passed'] for r in results),'checks':results,
+                'verification':'Python syntax only; no code imported or executed'}
     def checkpoint(self,message):
         if not isinstance(message,str) or not message.strip() or len(message)>200:raise ValueError('Short commit message required')
         files=self.list_files()
@@ -153,6 +175,9 @@ def check_static(workspace, checks):
         elif kind=='json':
             try:json.loads(path.read_text());passed=True
             except (ValueError,OSError):pass
+        elif kind=='python':
+            try:ast.parse(workspace.read_file(spec['path'])['content']);passed=True
+            except (SyntaxError,OSError):pass
         else:raise ValueError('Unsupported static check kind')
         results.append({'criterion':criterion,'passed':passed,'path':spec['path'],'check':kind})
     return results

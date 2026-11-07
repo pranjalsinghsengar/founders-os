@@ -1,5 +1,6 @@
 """Independent model review with durable audit and normal workflow budget gates."""
 import json
+import re
 from pathlib import Path
 from core import PolicyError, ToolFailure
 
@@ -36,6 +37,21 @@ def run_review(company, task, model, artifact_dir, cost=10):
         raise PolicyError('Explicit acceptance_criteria are required for automated QA')
     inputs = {'assignment': assignment, 'deliverable': read_artifact('artifact'),
               'evidence': review_evidence(json.loads(read_artifact('evidence')))}
+    # A citation to a local QA report is not its contents. Supply bounded
+    # referenced product documents so reviews can inspect the actual bug log.
+    if company.db.execute("SELECT 1 FROM sqlite_master WHERE name='workspaces'").fetchone():
+        from workspace import get_workspace
+        if company.db.execute('SELECT 1 FROM workspaces WHERE project=?',(row['project'],)).fetchone():
+            workspace=get_workspace(company,row['project'])
+            documents={}
+            for name in sorted(set(re.findall(r'\bdocs/[A-Za-z0-9_./-]+\.(?:md|json)\b',inputs['deliverable'])))[:10]:
+                value=workspace.read_file(name)
+                if 'content' in value:
+                    if re.search(r'\bsk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----',value['content']):
+                        raise PolicyError('Credential-like material cannot enter model review')
+                    documents[name]=value['content']
+            if sum(len(v.encode()) for v in documents.values())>100000:raise PolicyError('Referenced QA documents exceed review limit')
+            if documents:inputs['referenced_workspace_documents']=documents
     reviewer = row['reviewer']
     review_task = company.task(row['project'], reviewer, 'operator.' + reviewer,
                                'employee.qa', {'source_task': task, 'source_attempt': row['attempts']})

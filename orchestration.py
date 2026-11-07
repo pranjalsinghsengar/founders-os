@@ -133,7 +133,7 @@ def run_ready(company, project, execute, review, max_actions=10):
         if not p or not p['approved'] or p['paused'] or len(actions) >= max_actions:
             break
         # Planner installation requires a reviewed plan; QA report tasks require operator review.
-        if row['tool'] in ('employee.qa', 'employee.planner'):
+        if row['tool']=='employee.planner' or (row['tool']=='employee.qa' and json.loads(row['payload']).get('source_task')):
             continue
         if row['status'] in ('queued', 'blocked', 'changes_requested'):
             if company.db.execute("SELECT 1 FROM dependencies d JOIN tasks t ON t.id=d.dependency WHERE d.task=? AND t.status!='completed'", (row['id'],)).fetchone():

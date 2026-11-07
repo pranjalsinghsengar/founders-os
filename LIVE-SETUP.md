@@ -1,13 +1,97 @@
 # Stage 2: model workers and MCP connections
 
+## Backend source and isolated Python QA
+
+Optional automatic local recovery: set `local_recovery_enabled: true` in the
+local configuration. Enabled delivery workflows diagnose fixed worker-round and
+self-check failures, retry within remaining attempts, or create one audited repair
+assignment when the original attempts are exhausted. Original failed tasks and
+attempts remain recorded; dependent plan tasks are redirected to the repair, which
+keeps the original criteria and independent review. Repair lineages cannot grow
+indefinitely. The supervisor reserves enough current allowance for the worker,
+configured correction cycles and review before scheduling. It does not increase
+budgets, retry unknown external outcomes, bypass permissions or certify release.
+The dashboard must remain running for background recovery. Contradictory positive
+self-check summaries with explicit failed criteria are corrected to rejection and
+normal corrective work; they never authorize submission.
+
+Configure `employees.repair_engineer` with `skills/repair_engineer.md` and
+`run_cost_units: 20` to send diagnosed local product failures to a dedicated
+Repair Engineer. It gets scoped source/test/report and local checkpoint tools,
+keeps the original task's acceptance criteria and independent reviewer, and has
+two attempts on its repair assignment. Failed originals remain in audit history.
+There is at most one replacement per repair lineage; budgets and external-account
+permissions are never expanded. It cannot repair the orchestration host itself or
+unknown deployment/provider outcomes. The Employees view shows the configured
+role; Tasks and Activity show its assignments, diagnostics and review handoffs.
+
+Employee model round limits can be set per role with
+`employees.developer.max_rounds` (`null` for no cap, or integer 1–50); otherwise
+the worker uses global `max_rounds`, default 6. Set global `max_rounds` to `null`
+and remove role overrides to disable round caps for every employee. Configuration
+applies when a worker starts; in-flight workers retain their original settings.
+Round exhaustion retains saved files and response
+artifacts, reports `worker_round_limit`, and withholds independent submission.
+Inspect the files before a bounded local retry. More rounds permit additional
+provider calls; they do not increase the project allowance or retry limit, and
+internal units are not provider invoice limits. Mock AI outputs remain simulations.
+
+Workspace tools now accept `.py`, `.ts`, `.tsx`, `.jsx` and `.toml` alongside
+existing web/document files. Path, hidden-file, symlink and size restrictions still
+apply. `workspace/check_python` parses source without importing it. Syntax success
+does not certify behavior, encryption or integrations.
+
+To prepare Python functional tests, build the trusted image with
+`docker build -t company-python-qa:local qa-image`, then obtain its immutable ID
+with `docker image inspect company-python-qa:local --format '{{.Id}}'`. Set
+`python_test_image` in local company.config.json to that `sha256:…` ID. Keep Docker
+running. Image construction downloads dependencies; test execution never pulls or
+installs packages. `workspace/test_python` runs `tests/test_*.py` in an offline,
+read-only container with dropped capabilities, resource limits and an ephemeral
+source snapshot. It forwards no company API keys or OAuth tokens. Generated tests
+define coverage; passing them is not proof of complete security or compliance.
+
+Verified for project b82587cb: eight actual backend tests cover authentication,
+encrypted payload/usernames, cross-user isolation, account/data deletion,
+malformed input, restart persistence, missing-key rejection and a locally trusted
+HTTPS handshake. No live customer data or deployment was involved. Remaining
+MVP features, real AI module integration and production hosting are separate work.
+
 ## Local distribution setup
+
+Budget amendments: open a project’s **Overview → Internal budget**, enter the
+additional units and click **Approve budget increase**. Confirmation records an
+audited founder amendment using the displayed current total; stale or duplicate
+amendments are rejected. Scope, spent units and blocked state are preserved.
+CLI: `increase-budget PROJECT_ID --amount 100 --expected-budget 100`.
+
+When an enabled autonomous workflow blocks, a durable Gmail failure notification
+is queued. The running dashboard sends one alert per failure incident, containing
+the reason, remaining internal units and a **Review & retry** link to the local
+dashboard. Keep the dashboard running on that computer. Email delivery with an
+unknown outcome is not automatically repeated. These alerts do not grant approval.
+
+The link opens **Overview → Automation recovery**. **Review & retry local work**
+requires confirmation, sufficient allowance for the attempt/self-check/review,
+remaining attempts and local-only employee grants. It preserves prior attempts,
+files and audit history. External-write outcomes, failed reviews, research and
+unimplemented release integrations require reconciliation; the button does not
+bypass them. Increasing a budget never triggers a retry by itself.
+
+Known research self-check formatting failures can be recovered from saved provider
+responses without repeating research or charging another attempt. Recovery requires
+a completed, single fenced JSON check that passes every original criterion, an
+unchanged draft and saved search sources. It restores `awaiting_review`, never
+acceptance. Paused, interrupted, uncertain, genuinely rejected or malformed work
+remains blocked. Autonomous handoffs apply this narrow recovery before stopping.
 
 Run `python company_cli.py ai-discover` to list installed Codex and Claude CLIs.
 This only checks PATH; it does not read authentication files, launch a model or
 consume provider usage. Run `python company_cli.py init --no-serve --ai codex`
-to initialize and save a preferred local AI. Preference is separate from the
-active runtime: **local CLI worker adapters are still missing**, so existing
-research and employee work continues through the configured OpenAI API.
+to initialize and activate Codex for new employee, planning and review calls.
+The adapter reuses local CLI login and returns structured tool proposals to the
+existing Company gateway. Claude and CLI research evidence remain unavailable;
+CLI research stops explicitly without silently switching to the API.
 
 After an approved product has actual source files in its registered workspace,
 run `python company_cli.py export-project PROJECT_ID`. It writes a bounded ZIP
@@ -738,3 +822,84 @@ GitHub CLI authentication. Reconciliation prevents blind repeated creation/push.
 New local roots are grouped by market; existing roots remain intact. No live GitHub
 write occurred in verification. Hosting and complete product behavioral QA remain
 unconnected. Static workspace QA is also available in live task details.
+
+## Codex CLI employee runtime
+
+Sign into your installed CLI with `codex login` if needed, then run:
+
+```sh
+.venv/bin/python company_cli.py init --no-serve --ai codex
+.venv/bin/python company_cli.py ai-verify
+```
+
+`ai-verify` makes one live text-only request, consuming CLI account usage. No key
+is printed or copied. New employees, planning, self-checks and independent reviews
+use Codex. In-flight calls retain their prior runtime. The adapter uses an empty
+temporary working directory, read-only sandbox, ignores personal config/rules,
+disables native shell, plugins, apps, hooks, browser and agent delegation, and
+forwards only environment needed for CLI authentication. Company tools remain
+external: structured proposals are checked against supplied schemas and passed
+through existing grants, budget, pause and audit controls. No automatic retry or
+API fallback occurs on CLI failure. Timeout defaults to 180 seconds (10–600 via
+`codex_timeout_seconds`). Set optional `codex_model` only to a CLI-accessible model;
+the existing API `model` value is not reused for CLI calls.
+
+Research currently requires saved Responses web-search evidence. Codex research
+therefore reports an explicit integration blocker; this is not a complete CLI-only
+idea-to-release workflow. Claude is not connected. To restore API execution, set
+`model_runtime` to `openai_api` in the local config. Selection does not configure
+AI credentials for generated products; those products have their own setup.
+
+Codex execution options: https://developers.openai.com/codex/noninteractive
+
+CLI discovery also checks VS Code and Cursor OpenAI extension binaries when
+Codex is absent from the terminal PATH. Selecting Codex saves the absolute
+`codex_executable` in local config; employees and dashboard use that same path.
+If an extension update removes it, rerun `init --no-serve --ai codex`.
+
+Project and linked idea details show **Open application preview** when a local
+`product_previews` entry is configured for the project ID, with `url` and `mode`.
+Only loopback HTTP/HTTPS URLs with an explicit port are allowed. The link opens
+a new tab and labels simulation previews. It does not start a server; keep the
+product running separately. This is the actual product, distinct from `/preview`
+which is the dashboard design mockup.
+
+## Request product changes
+
+Open a product project and select **Changes**. Enter a prompt and choose
+**Send change request**, then **Apply requested change** to authorize the paid
+employee run. Requests persist as developer tasks with independent QA, fixed
+local-scope constraints and the current project allowance. **View progress and
+response** opens saved task evidence; **Run independent review** is available
+after submission. Saving a prompt alone never runs a model. Review completion
+is separate from deployment. Restart the product server after accepted backend
+changes to load them; frontend files are served from the workspace.
+
+When local recovery is enabled, diagnosed local failures in **Changes** requests
+also receive bounded repairs, even outside an installed delivery plan. Saved-only
+requests are not automatically started. Original failures and attempts remain
+in audit history; one specialist replacement per lineage is allowed, with the
+existing budget, pause and independent-review gates. Before self-checks, employees
+now read current source through granted workspace tools so historical readbacks
+do not conceal a corrected implementation. Final evidence includes those snapshots.
+
+## Automatic project changes and live employee status
+
+In **Projects → Changes**, **Run autonomously** is selected by default. Choosing
+**Send & start autonomously** records authorization for developer execution,
+independent review and scoped corrections within the existing project allowance.
+The supervisor advances those tasks every five seconds while the dashboard runs.
+Uncheck it to save a draft request without starting work. The local
+`project_changes_autonomous` preference also enables review/rework handoffs for
+already-started chat tasks; it never starts saved-only requests with zero attempts.
+Known local failures route to Repair Engineer when local recovery is enabled.
+Each lineage remains bounded, and original errors and attempts stay recorded.
+
+Project headers, task tables and change cards show the running employee with a
+loading indicator. Error icons open task details with the actual failure note,
+quality reports and audit history. Repaired errors are labelled as previous errors.
+Pause, exhausted allowance/attempts, missing tools and uncertain review/provider
+outcomes stop automatic execution. A failed review call for the same attempt is
+not silently repeated. Production deployment is not authorized by a change prompt.
+
+Dashboard history and logs show full date and time in IST (Asia/Kolkata), newest activity first. Tasks show creation and latest recorded activity times recovered from durable events. Older records without timestamps display “Time not recorded.”

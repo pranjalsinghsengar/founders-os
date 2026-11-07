@@ -6,13 +6,15 @@ import uuid
 from pathlib import Path
 from core import PolicyError, ToolFailure
 from idea_store import idea_by_id
-from discovery import discover, draft_proposal, register_proposal
+from discovery import discover, draft_proposal, register_proposal, reconcile_saved_research
 from qa import run_review
 from gmail_approval import Gmail, EmailApprovals, GmailError
 from research_modes import research_profile
 from quality_gate import quality_settings
 
 def initialize_autonomy(company):
+    from failure_notifications import initialize
+    initialize(company)
     company.db.execute('''CREATE TABLE IF NOT EXISTS autonomy_runs (
         id TEXT PRIMARY KEY, idea TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL,
         status TEXT NOT NULL, stage TEXT NOT NULL, note TEXT NOT NULL,
@@ -76,6 +78,9 @@ def advance_autonomy(company, identifier, config, root, model_factory, delivery,
                 if key not in ('proposal_task','project','email_request'):raise ValueError('Invalid workflow field')
                 company.db.execute('UPDATE autonomy_runs SET '+key+'=? WHERE id=?',(value,identifier))
             company.event('autonomy.progress',workflow=identifier,idea=idea['id'],status=status,stage=stage,note=note)
+            if status=='blocked':
+                from failure_notifications import queue_blocked
+                queue_blocked(company,identifier,stage,note)
         return {'workflow':identifier,'status':status,'stage':stage,'note':note}
     def assessment(task):
         prior=company.db.execute("SELECT payload FROM tasks WHERE project=? AND tool='employee.qa'",(task['project'],)).fetchall()
@@ -94,10 +99,16 @@ def advance_autonomy(company, identifier, config, root, model_factory, delivery,
                     budget=run['research_budget'],market=idea['market'],idea=idea,
                     rework_task=task['id'] if task else None,research_mode=run['research_mode'])
                 if result['status']!='awaiting_review':
+                    if reconcile_saved_research(company,result['research_task'],root/'artifacts'):
+                        return update('ready','research','Saved research formatting recovered; independent review is next')
                     return update('blocked','research','Research did not pass its pre-submission gate; inspect feedback')
                 return update('ready','research','Research submitted; AI will independently review it')
             if task['status']=='awaiting_review':return assessment(task)
-            if task['status']!='completed':return update('blocked','research','Research is failed or interrupted; reconcile before retrying')
+            if task['status']=='failed' and reconcile_saved_research(company,task['id'],root/'artifacts'):
+                return update('ready','research','Saved research formatting recovered; independent review is next')
+            if task['status']!='completed':return update('blocked','research',
+                'Research is failed or interrupted; reconcile before retrying. Task feedback: '+
+                (task['note'] or 'No failure detail recorded'))
             return update('ready','proposal','Research accepted; preparing the investment proposal')
         if run['stage']=='proposal':
             task=company.db.execute('SELECT * FROM tasks WHERE id=?',(run['proposal_task'],)).fetchone() if run['proposal_task'] else None
@@ -144,7 +155,12 @@ def advance_autonomy(company, identifier, config, root, model_factory, delivery,
             r=company.db.execute('SELECT state,expires FROM email_requests WHERE id=?',(run['email_request'],)).fetchone()
             if r['state']!='sent' or r['expires']<=time.time():
                 return update('blocked','approval','Approval rejected, changed or expired; no product work starts')
-            return update('waiting_approval','approval','Waiting for your authenticated investment decision',delay=60)
+            invalid=company.db.execute("SELECT details FROM events WHERE kind='approval.email.reply.invalid' AND json_extract(details,'$.request')=? ORDER BY id DESC LIMIT 1",
+                                       (run['email_request'],)).fetchone()
+            note='Waiting for your authenticated investment decision'
+            if invalid:
+                note='Approval reply could not be authenticated: copy the complete APPROVE command from the original email, including its full verification token, and reply in that thread'
+            return update('waiting_approval','approval',note,delay=60)
         if run['stage']=='delivery':
             result=delivery(run['project'])
             if result['status']=='waiting':return update('ready','delivery','Continuing approved delivery automatically')
@@ -155,6 +171,42 @@ def advance_autonomy(company, identifier, config, root, model_factory, delivery,
     except Exception:
         update('blocked',run['stage'],'Unexpected or unknown outcome; reconcile before retrying')
         raise
+
+def retry_autonomy(company, identifier, config, schedule=True):
+    """Founder-confirmed retry of local employee work; no remote-write retries."""
+    initialize_autonomy(company)
+    with company.transaction():
+        run=company.db.execute('SELECT * FROM autonomy_runs WHERE id=?',(identifier,)).fetchone()
+        if not run or not run['enabled'] or run['status']!='blocked':raise PolicyError('Only an enabled blocked workflow can retry')
+        idea=idea_by_id(company,run['idea'])
+        project=run['project'] or idea['research_project']
+        if run['stage'] not in ('research','proposal','delivery'):raise PolicyError('Reconcile this integration outcome before retrying')
+        p=company.db.execute('SELECT * FROM projects WHERE id=?',(project,)).fetchone()
+        if not p or not p['approved'] or p['paused']:raise PolicyError('Project must be approved and active')
+        if company.db.execute("SELECT 1 FROM trash WHERE (kind='project' AND target=?) OR (kind='idea' AND target=?)",(project,idea['id'])).fetchone():raise PolicyError('Restore associated items first')
+        if company.db.execute("SELECT 1 FROM tasks WHERE project=? AND status='running'",(project,)).fetchone():raise PolicyError('A worker is active or interrupted; reconcile first')
+        failed=company.db.execute("SELECT * FROM tasks WHERE project=? AND status='failed'",(project,)).fetchall()
+        if not failed:raise PolicyError('No failed local task to retry; resolve the reported blocker before resuming')
+        minimum=0
+        for task in failed:
+            if task['tool']=='employee.qa':raise PolicyError('Failed independent reviews require separate reconciliation')
+            if task['attempts']>=task['max_attempts']:raise PolicyError('Task retry limit reached')
+            if not task['tool'].startswith('employee.') or task['owner'] not in config.get('employees',{}):
+                raise PolicyError('Retry supports local employee tasks only; research/integration failures require reconciliation')
+            grants=[r[0] for r in company.db.execute('SELECT tool FROM grants WHERE project=? AND role=?',(project,task['owner']))]
+            if any(not g.startswith(('employee.','workspace/')) for g in grants):raise PolicyError('External tool outcomes must be reconciled before retrying')
+            minimum+=config['employees'][task['owner']].get('run_cost_units',20)+quality_settings(config)['check_cost_units']+config.get('qa_run_cost_units',10)
+        if p['budget']-p['spent']<minimum:raise PolicyError('Insufficient allowance for retry and review; increase the internal budget first')
+        for task in failed:
+            company.db.execute("UPDATE tasks SET status='changes_requested',note=? WHERE id=?",
+                ('Founder requested bounded local retry. Inspect existing files and prior failure before acting; do not claim missing integrations are available. '+(task['note'] or ''),task['id']))
+            company.event('task.retry.authorized.local',task=task['id'],attempt=task['attempts'],workflow=identifier)
+        company.db.execute("UPDATE autonomy_runs SET status=?,next_at=0,note=?,owner_pid=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            ('ready' if schedule else 'blocked','Founder confirmed local retry within current allowance' if schedule else
+             'Stepwise repair: operator prepared one bounded retry; automatic handoffs held for verification',identifier))
+        company.event('autonomy.retry.authorized',workflow=identifier,minimum_units=minimum)
+    return {'status':'ready' if schedule else 'blocked','minimum_units':minimum}
+
 
 def resume_autonomy(company, identifier):
     """Founder explicitly resumes known stopped work; unresolved failures stay blocked."""
@@ -168,13 +220,20 @@ def resume_autonomy(company, identifier):
             if not project:continue
             if company.db.execute("SELECT 1 FROM trash WHERE kind='project' AND target=?",(project,)).fetchone():
                 raise PolicyError('Restore associated projects before resuming')
-            if company.db.execute("SELECT 1 FROM tasks WHERE project=? AND status IN ('failed','running')",(project,)).fetchone():
+            superseded=" AND id NOT IN (SELECT source_task FROM local_repairs)" if company.db.execute("SELECT 1 FROM sqlite_master WHERE name='local_repairs'").fetchone() else ''
+            if company.db.execute("SELECT 1 FROM tasks WHERE project=? AND status IN ('failed','running')"+superseded,(project,)).fetchone():
                 raise PolicyError('Reconcile failed or interrupted tasks before resuming')
+            remaining=company.db.execute('SELECT budget-spent FROM projects WHERE id=?',(project,)).fetchone()[0]
+            if remaining<=0 and (project==run['project'] or not run['project']):
+                raise PolicyError('Increase the approved internal allowance before resuming')
             company.db.execute('UPDATE projects SET paused=0 WHERE id=?',(project,))
         if company.db.execute("SELECT 1 FROM trash WHERE kind='idea' AND target=?",(run['idea'],)).fetchone():
             raise PolicyError('Restore the idea before resuming')
         if run['email_request'] and company.db.execute("SELECT 1 FROM email_requests WHERE id=? AND state IN ('sending','unknown')",(run['email_request'],)).fetchone():
             raise PolicyError('Reconcile uncertain email delivery before resuming')
-        company.db.execute("UPDATE autonomy_runs SET enabled=1,status='ready',next_at=0,note='Founder resumed automatic handoffs',updated_at=CURRENT_TIMESTAMP WHERE id=?",(identifier,))
+        # Delivery blockers are reported as stages, but budget is not an
+        # executable handoff. Restore delivery after an explicit funded resume.
+        stage='delivery' if run['stage']=='budget' and run['project'] else run['stage']
+        company.db.execute("UPDATE autonomy_runs SET enabled=1,status='ready',stage=?,next_at=0,note='Founder resumed automatic handoffs',updated_at=CURRENT_TIMESTAMP WHERE id=?",(stage,identifier))
         company.event('autonomy.resumed',workflow=identifier)
     return {'workflow':identifier,'status':'ready'}

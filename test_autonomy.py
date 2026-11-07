@@ -6,8 +6,8 @@ import os
 import unittest
 from email.message import EmailMessage
 from pathlib import Path
-from unittest.mock import Mock
-from core import Company, PolicyError
+from unittest.mock import Mock, patch
+from core import Company, PolicyError, ToolFailure
 from idea_store import create_idea
 from autonomy import start_autonomy,advance_autonomy,resume_autonomy
 from autonomy_service import AutonomyService
@@ -35,6 +35,25 @@ class AutonomyTests(unittest.TestCase):
             result=self.advance()
             if result['status']=='waiting_approval':return result
         self.fail('Did not reach approval')
+    def test_known_formatting_failure_recovers_automatically_without_research_retry(self):
+        class FencedModel(ScriptedModel):
+            def complete(self,instructions,history,tools):
+                result=super().complete(instructions,history,tools)
+                if instructions.startswith('Check your work'):
+                    part=result['output'][0]['content'][0]
+                    part['text']='```json\n'+part['text']+'\n```'
+                return result
+        self.model=FencedModel()
+        # Simulate the old parser refusing the saved first check.
+        with patch('quality_gate.parse_check',side_effect=ToolFailure('quality_invalid_check')):
+            result=self.advance()
+        self.assertEqual(result['status'],'ready')
+        self.assertEqual(self.model.calls,2)
+        source=self.c.db.execute('SELECT research_task FROM ideas WHERE id=?',(self.idea,)).fetchone()[0]
+        task=self.c.db.execute('SELECT status,attempts FROM tasks WHERE id=?',(source,)).fetchone()
+        self.assertEqual(tuple(task),('awaiting_review',1))
+        self.advance()
+        self.assertEqual(self.c.db.execute('SELECT status FROM tasks WHERE id=?',(source,)).fetchone()[0],'completed')
     def test_automatic_idea_to_email_then_authenticated_approval_and_delivery(self):
         self.to_approval()
         self.assertEqual(self.gmail.calls,1);self.assertEqual(self.deliveries,[])
@@ -121,3 +140,21 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(c.db.execute('SELECT status FROM autonomy_runs').fetchone()[0],'running')
         c.db.execute("UPDATE autonomy_runs SET status='ready',enabled=0")
         self.service.tick();self.controls.submit.assert_not_called();c.db.close()
+
+    def test_opted_in_chat_failure_schedules_bounded_repair_without_delivery_plan(self):
+        cfg={'local_recovery_enabled':True,'employees':{'developer':{'run_cost_units':20},'repair_engineer':{'run_cost_units':20}}}
+        Path(self.controls.config).write_text(json.dumps(cfg))
+        c=Company(self.db)
+        try:
+            p,d=c.project({'title':'Founder change'},100);c.approve_local(p,d)
+            c.grant(p,'developer','employee.developer');c.grant(p,'developer','workspace/read_file')
+            t=c.task(p,'developer','qa','employee.developer',{'kind':'founder_change','objective':'Change UI','acceptance_criteria':['Fixture']})
+            c.db.execute("UPDATE tasks SET status='failed',attempts=1 WHERE id=?",(t,))
+            c.event('tool.failed',task=t,failure_code='quality_not_ready')
+            self.service.tick()
+            self.controls.submit.assert_called_once()
+            request=self.controls.submit.call_args.args[0]
+            self.assertEqual(request['action'],'run');self.assertTrue(request['confirmed'])
+            self.assertEqual(c.db.execute('SELECT owner FROM tasks WHERE id=?',(request['task'],)).fetchone()[0],'repair_engineer')
+            self.assertEqual(c.db.execute('SELECT attempts FROM tasks WHERE id=?',(t,)).fetchone()[0],1)
+        finally:c.db.close()

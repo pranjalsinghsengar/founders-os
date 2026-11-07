@@ -38,6 +38,16 @@ class OrchestrationTests(unittest.TestCase):
     def tearDown(self):
         self.c.db.close()
         self.tmp.cleanup()
+    def test_planned_qa_executes_but_review_audit_does_not(self):
+        audit=self.c.task(self.p,'qa','operator.qa','employee.qa',{'source_task':'fixture','source_attempt':1})
+        self.c.db.execute("UPDATE tasks SET status='awaiting_review' WHERE id=?",(audit,))
+        assignment=self.c.task(self.p,'qa','product_manager','employee.qa',
+            {'objective':'Run functional QA','acceptance_criteria':['Actual evidence']})
+        executed=[]
+        def execute(task):executed.append(task);return 'awaiting_review'
+        actions=run_ready(self.c,self.p,execute,lambda _:self.fail('Audit must not be reviewed automatically'))
+        self.assertEqual(executed,[assignment])
+        self.assertEqual(actions[0]['task'],assignment)
     def reviewed_plan(self):
         result = generate_plan(self.c, self.p, Planner(), self.cfg, self.root)
         self.assertEqual(result['status'], 'awaiting_review')

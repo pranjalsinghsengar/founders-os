@@ -39,6 +39,18 @@ class QATests(unittest.TestCase):
         self.assertEqual(self.status(), 'completed')
         self.assertTrue((self.root / (result['review_task'] + '.qa.json')).exists())
         self.assertEqual(self.c.snapshot()['projects'][0]['spent'], 10)
+    def test_referenced_bug_log_contents_are_supplied_to_reviewer(self):
+        from workspace import setup_workspace,get_workspace
+        setup_workspace(self.c,self.p,self.root/'products')
+        get_workspace(self.c,self.p).write_file('docs/qa_bug_log.md','P0: synthetic defect, resolved with executed evidence')
+        (self.root/'result.md').write_text('Prioritized bugs are recorded in docs/qa_bug_log.md.')
+        test=self
+        class ReadDocuments(Model):
+            def complete(self,instructions,history,tools):
+                inputs=json.loads(history[0]['content'])
+                test.assertIn('P0: synthetic defect',inputs['referenced_workspace_documents']['docs/qa_bug_log.md'])
+                return super().complete(instructions,history,tools)
+        self.assertEqual(run_review(self.c,self.t,ReadDocuments(),self.root)['status'],'completed')
     def test_reject_allows_rework(self):
         run_review(self.c, self.t, Model(False), self.root)
         self.assertEqual(self.status(), 'changes_requested')

@@ -9,6 +9,7 @@ from pathlib import Path
 from core import Company
 
 COMMANDS = {
+ 'failure-notify':('notification',), 'retry-autonomy':('workflow',),
  'start-autonomy':('idea',), 'advance-autonomy':('workflow',), 'resume-autonomy':('workflow',),
  'start-delivery':('project',),
  'run':('task',), 'qa':('task',), 'qa-static':('task',), 'plan':('project',), 'apply-plan':('task',),
@@ -20,8 +21,11 @@ COMMANDS = {
 }
 PAID={'run','qa','plan','tick','discover','rework-research','draft-proposal','start-delivery','start-autonomy','advance-autonomy','resume-autonomy'}
 EXTERNAL=PAID|{'repo-create','repo-push','repo-reconcile','email-proposal','email-poll','email-reconcile'}
+PAID.add('retry-autonomy')
+EXTERNAL.update(('retry-autonomy','failure-notify'))
 CONFIG={'run','qa','qa-static','plan','apply-plan','tick','discover','rework-research','draft-proposal','workspace-init','email-proposal','email-poll','email-reconcile','doctor','start-delivery'}
 CONFIG.update(('start-autonomy','advance-autonomy','resume-autonomy'))
+CONFIG.update(('retry-autonomy','failure-notify'))
 
 class Controls:
  def __init__(self,db,config):
@@ -48,7 +52,11 @@ class Controls:
   args=[]
   for field in COMMANDS[action]:
    value=data.get(field,'')
-   try:uuid.UUID(value)
+   try:
+    if field=='notification':
+     import re
+     if not isinstance(value,str) or not re.fullmatch('[a-f0-9]{64}',value):raise ValueError('Invalid notification')
+    else:uuid.UUID(value)
    except (ValueError,TypeError,AttributeError):raise ValueError('Valid identifier required')
    args.append(value)
   if action=='repo-create':
@@ -95,7 +103,7 @@ class Controls:
      criteria=json.loads(row['payload']).get('acceptance_criteria',[]) if row else []
      if not row or row['status']!='awaiting_review' or not isinstance(checks,dict) or not criteria or set(checks)!=set(criteria):raise ValueError('Static QA requires exactly one trusted check per acceptance criterion')
      for spec in checks.values():
-      if not isinstance(spec,dict) or spec.get('kind') not in ('exists','contains','html','json') or not isinstance(spec.get('path'),str):raise ValueError('Unsupported static check')
+      if not isinstance(spec,dict) or spec.get('kind') not in ('exists','contains','html','json','python') or not isinstance(spec.get('path'),str):raise ValueError('Unsupported static check')
      check_root=Path(self.config).parent/'artifacts'/'checks';check_root.mkdir(parents=True,exist_ok=True)
      check_path=check_root/(identifier+'.json');check_path.write_text(json.dumps(checks))
      args+=['--workspace-checks',str(check_path)]
@@ -133,6 +141,13 @@ class Controls:
   c=Company(self.db)
   try:
    action=data.get('action');project=data.get('project')
+   if action=='delete-project':
+    from project_deletion import delete_project
+    return delete_project(c,project,Path(self.config).resolve().parent,data.get('confirmed'))
+   if action=='increase-budget':
+    if data.get('confirmed') is not True:raise ValueError('Confirm the internal budget increase')
+    if c.db.execute("SELECT 1 FROM dashboard_jobs WHERE status IN ('queued','running')").fetchone():raise ValueError('Wait for active work before changing budget')
+    return c.increase_budget(project,data.get('amount'),data.get('expected_budget'))
    if action=='stop-autonomy':
     workflow=data.get('workflow')
     with c.transaction():
@@ -177,6 +192,54 @@ class Controls:
    if not c.db.execute('SELECT 1 FROM projects WHERE id=?',(project,)).fetchone():raise ValueError('Unknown project')
    if c.db.execute("SELECT 1 FROM trash WHERE kind='project' AND target=?",(project,)).fetchone():raise ValueError('Restore the project from Trash first')
    cfg=json.loads(Path(self.config).read_text());roles=cfg.get('employees',{})
+   if action=='retry-project-change':
+    if data.get('confirmed') is not True:raise ValueError('Authorize retry within the existing project allowance')
+    if c.db.execute("SELECT 1 FROM dashboard_jobs WHERE status IN ('queued','running')").fetchone():raise ValueError('Wait for active work before retrying')
+    task=data.get('task')
+    row=c.db.execute('SELECT * FROM tasks WHERE id=? AND project=?',(task,project)).fetchone()
+    if not row or json.loads(row['payload']).get('kind')!='founder_change':raise ValueError('Select a project change request')
+    if row['status']!='failed':raise ValueError('Change is no longer failed; refresh its progress')
+    from local_recovery import recover_local
+    with c.transaction():
+     result=recover_local(c,task,cfg,Path(self.config).resolve().parent)
+     if not result:
+      failure=c.db.execute("SELECT details FROM events WHERE kind='tool.failed' AND json_extract(details,'$.task')=? ORDER BY id DESC LIMIT 1",(task,)).fetchone()
+      code=json.loads(failure[0]).get('failure_code') if failure else None
+      if code in ('cli_execution','cli_missing','cli_timeout','cli_invalid_response'):
+       project_row=c.db.execute('SELECT approved,paused,budget-spent AS remaining FROM projects WHERE id=?',(project,)).fetchone()
+       if not project_row['approved'] or project_row['paused']:raise ValueError('Retry blocked: project must be approved and not paused')
+       if row['attempts']>=row['max_attempts']:raise ValueError('Retry blocked: this change has exhausted its attempts')
+       if project_row['remaining']<=0:raise ValueError('Retry blocked: increase the project allowance first')
+       if c.db.execute("SELECT 1 FROM tasks WHERE project=? AND status='running'",(project,)).fetchone():raise ValueError('Wait for the current employee to finish')
+       grants=[r[0] for r in c.db.execute('SELECT tool FROM grants WHERE project=? AND role=?',(project,row['owner']))]
+       if not grants or any(not g.startswith(('employee.','workspace/')) for g in grants):raise ValueError('Retry blocked: requires local employee and workspace permissions only')
+       c.db.execute("UPDATE tasks SET status='changes_requested' WHERE id=?",(task,))
+       result={'task':task,'strategy':'retry','code':code}
+      else:raise ValueError('Retry blocked: check allowance, pause state, repair attempts and saved failure evidence. Unknown tool outcomes must be reconciled before retrying.')
+     target=result['task']
+     payload=json.loads(c.db.execute('SELECT payload FROM tasks WHERE id=?',(target,)).fetchone()[0]);payload['autonomous']=True
+     c.db.execute('UPDATE tasks SET payload=? WHERE id=?',(json.dumps(payload),target))
+     c.event('project.change.retry.requested',project=project,task=target,source_task=task)
+    return {**result,'status':'queued','message':'Local repair queued for automatic development and independent review'}
+   if action=='request-project-change':
+    prompt=data.get('prompt')
+    autonomous=data.get('autonomous',False)
+    if type(autonomous) is not bool:raise ValueError('Invalid autonomous change setting')
+    if autonomous and data.get('confirmed') is not True:raise ValueError('Authorize autonomous change execution')
+    if not isinstance(prompt,str) or not 1<=len(prompt.strip())<=6000:raise ValueError('Describe the change in 1–6000 characters')
+    row=c.db.execute('SELECT approved,paused,budget-spent AS remaining FROM projects WHERE id=?',(project,)).fetchone()
+    if not row['approved'] or row['paused']:raise ValueError('Project must be approved and not paused')
+    if 'developer' not in roles or 'qa' not in roles:raise ValueError('Configure developer and QA roles first')
+    if row['remaining']<=0:raise ValueError('Project allowance is exhausted')
+    payload={'kind':'founder_change','autonomous':autonomous,'founder_prompt':prompt.strip(),
+      'objective':'Implement founder change in the existing local product: '+prompt.strip(),
+      'acceptance_criteria':['Implement the founder request within the approved local product scope; explain any unmet requirements.',
+        'Preserve existing functionality, authentication, data isolation and saved data; verify relevant regression checks.',
+        'Provide actual changed files and executed verification evidence, with simulations and remaining limitations clearly labelled.'],
+      'constraints':'Inspect existing source and tests first. Local product work only. Do not copy company credentials, deploy, contact customers, change budgets or bypass review. Requests beyond existing authority must be reported as blockers.'}
+    task=c.task(project,'developer','qa','employee.developer',payload)
+    c.event('project.change.requested',project=project,task=task)
+    return {'task':task,'status':'queued'}
    if action=='assign':
     role=data.get('role');reviewer=data.get('reviewer');payload=data.get('payload')
     if role not in roles or reviewer not in roles or not isinstance(payload,dict) or not payload.get('objective') or not payload.get('acceptance_criteria'):raise ValueError('Configured roles, objective and criteria required')
@@ -185,7 +248,8 @@ class Controls:
     role=data.get('role');tool=data.get('tool')
     allowed={'employee.'+r for r in roles}
     for server in cfg.get('mcp_servers',[]):allowed.update(server['name']+'/'+t for t in server.get('allow_tools',{}))
-    allowed.update('workspace/'+t for t in ('list_files','read_file','write_file','checkpoint','inspect'))
+    from workspace import TOOLS
+    allowed.update('workspace/'+t for t in TOOLS)
     if role not in roles or tool not in allowed:raise ValueError('Configured role and allowlisted tool required')
     if action=='grant':c.grant(project,role,tool)
     else:

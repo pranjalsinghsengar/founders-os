@@ -4,6 +4,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const human = s => String(s || '').replaceAll('_',' ').replaceAll('.',' › ');
 const short = s => String(s || '').slice(0,8);
 const count = xs => xs.length;
+const historyTime = value => { if (!value) return 'Time not recorded'; const v=typeof value==='number'?value*1000:/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(value)?value.replace(' ','T')+'Z':value; const d=new Date(v); return Number.isNaN(d.getTime())?'Time not recorded':d.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZoneName:'short'}); };
 const csrf = $('meta[name="csrf-token"]').content;
 let data = null, busy = false, view = location.hash.slice(1) || 'overview', search = '', projectFilter = '', statusFilter = '';
 const routes = {
@@ -39,7 +40,7 @@ function projectTable(projects){
 }
 function taskTable(tasks){
  if(!tasks.length)return empty('No tasks match these filters.');
- return `<div class="table-wrap"><table><thead><tr><th>Assignment</th><th>Employee</th><th>Status</th><th>Attempts</th></tr></thead><tbody>${tasks.map(t=>`<tr><td><button class="table-title" data-task="${esc(t.id)}">${esc(taskName(t))}</button><span class="subtext">${esc(project(t.project)?.title || short(t.project))}${t.audit_task?' · Operator audit report':''}</span></td><td>${esc(roleName(t.owner))}</td><td>${badge(t.status)}</td><td>${t.attempts} / ${t.max_attempts}</td></tr>`).join('')}</tbody></table></div>`;
+ return `<div class="table-wrap"><table><thead><tr><th>Assignment</th><th>Employee</th><th>Status</th><th>Attempts</th><th>Date & time (IST)</th></tr></thead><tbody>${tasks.map(t=>`<tr><td><button class="table-title" data-task="${esc(t.id)}">${esc(taskName(t))}</button><span class="subtext">${esc(project(t.project)?.title || short(t.project))}${t.audit_task?' · Operator audit report':''}</span></td><td>${esc(roleName(t.owner))}</td><td>${badge(t.status)}</td><td>${t.attempts} / ${t.max_attempts}</td><td>${esc(historyTime(t.updated_at||t.created_at))}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function attention(){
  const entries=[];
@@ -48,7 +49,7 @@ function attention(){
  return entries;
 }
 function attentionList(entries){return entries.length?entries.map(e=>`<div class="attention-item"><div class="attention-icon">!</div><div class="attention-body"><h3>${esc(e.title)}</h3><p>${esc(e.body).slice(0,260)}${e.body.length>260?'…':''}</p><button class="text-button" ${e.task?`data-task="${esc(e.task)}"`:`data-project="${esc(e.project)}"`}>Inspect ${e.task?'task':'project'} →</button></div></div>`).join(''):empty('No blocked work or exhausted allowances.');}
-function timeline(events){return events.length?`<div class="timeline">${events.map(e=>`<div class="event"><span class="event-dot ${e.kind.includes('failed')?'error':''}"></span><div><div class="event-title">${esc(human(e.kind))}</div><div class="event-time">${esc(e.at)} UTC · ${esc(short(e.details.task||e.details.project||e.details.request))}</div>${e.details.reason?`<div class="subtext">${esc(e.details.reason)}</div>`:''}</div></div>`).join('')}</div>`:empty('Events will appear when the company performs work.');}
+function timeline(events){return events.length?`<div class="timeline">${events.map(e=>`<div class="event"><span class="event-dot ${e.kind.includes('failed')?'error':''}"></span><div><div class="event-title">${esc(human(e.kind))}</div><div class="event-time">${esc(historyTime(e.at))} · ${esc(short(e.details.task||e.details.project||e.details.request))}</div>${e.details.reason?`<div class="subtext">${esc(e.details.reason)}</div>`:''}</div></div>`).join('')}</div>`:empty('Events will appear when the company performs work.');}
 function overview(){
  const assignments=data.tasks.filter(t=>!t.audit_task),running=assignments.filter(t=>t.status==='running').length;
  const completed=assignments.filter(t=>t.status==='completed').length;
@@ -67,7 +68,7 @@ function employees(){return `<div class="employee-grid">${data.employees.filter(
  }).join('')}</div>`;}
 function approvals(){
  const requests=data.approvals.filter(r=>matches(r.id,project(r.project)?.title,r.state));
- const body=requests.length?`<div class="table-wrap"><table><thead><tr><th>Proposal</th><th>Email state</th><th>Expiry</th><th>Binding</th></tr></thead><tbody>${requests.map(r=>`<tr><td><button class="table-title" data-project="${esc(r.project)}">${esc(project(r.project)?.title||short(r.project))}</button><span class="subtext">Request ${short(r.id)}</span></td><td>${badge(r.state)}</td><td>${esc(new Date(r.expires*1000).toLocaleString())}${r.expires<Date.now()/1000?' <span class="subtext">Expired</span>':''}</td><td><code>${esc(short(r.binding))}</code></td></tr>`).join('')}</tbody></table></div>`:empty('No Gmail approval requests yet. Rejected research is not an investment proposal.');
+ const body=requests.length?`<div class="table-wrap"><table><thead><tr><th>Proposal</th><th>Email state</th><th>Expiry</th><th>Binding</th></tr></thead><tbody>${requests.map(r=>`<tr><td><button class="table-title" data-project="${esc(r.project)}">${esc(project(r.project)?.title||short(r.project))}</button><span class="subtext">Request ${short(r.id)} · ${esc(historyTime(r.updated_at||r.created_at))}</span></td><td>${badge(r.state)}</td><td>${esc(new Date(r.expires*1000).toLocaleString())}${r.expires<Date.now()/1000?' <span class="subtext">Expired</span>':''}</td><td><code>${esc(short(r.binding))}</code></td></tr>`).join('')}</tbody></table></div>`:empty('No Gmail approval requests yet. Rejected research is not an investment proposal.');
  return `${panel('Gmail approval requests','Approval remains bound to the proposal, budget, authority, and expiry',body)}<div class="section-gap">${panel('Unapproved candidates','View the complete proposal before requesting investment approval',projectTable(data.projects.filter(p=>!p.approved&&matches(p.title,p.id))))}</div>`;
 }
 function connections(){return `<div class="connection-grid">${data.connections.filter(c=>matches(c.name,c.detail,c.note)).map(c=>`<section class="panel connection-card"><h3>${esc(c.name)}</h3>${badge(c.status)}<p>${esc(c.detail)}</p><small>${esc(c.note)}</small></section>`).join('')}</div>`;}
@@ -86,7 +87,7 @@ function render(){
  const pages={controls,overview,projects:()=>panel('Project portfolio','Research mandates and product candidates are shown separately',projectTable(data.projects.filter(p=>matches(p.title,p.id)))),tasks,employees,approvals,activity:()=>panel('Audit trail','Most recent 250 durable events',timeline(data.events.filter(e=>matches(e.kind,JSON.stringify(e.details),e.at)))),connections,milestones};
  if(view!=='controls'||!$('#control-form')){$('#content').innerHTML=pages[view]();if(view==='controls')controlFields();}else{const result=controls();const holder=document.createElement('div');holder.innerHTML=result;const panels=$('#content').querySelectorAll('.panel');if(panels.length>1)panels[1].replaceWith(holder.querySelectorAll('.panel')[1]);}
  document.querySelectorAll('[data-width]').forEach(e=>{e.style.width=Number(e.dataset.width)+'%';});
- $('#updated').textContent='Updated '+new Date(data.updated_at).toLocaleTimeString();
+ $('#updated').textContent='Updated '+historyTime(data.updated_at);
 }
 async function load(){
  if(busy)return;busy=true;
@@ -150,7 +151,7 @@ const actions={
 function controls(){
  const projects=data.projects.map(p=>`<option value="${esc(p.id)}">${esc(p.title)} · ${short(p.id)}</option>`).join('');
  const roles=data.employees.filter(e=>e.configured).map(e=>`<option>${esc(e.role)}</option>`).join('');
- const jobs=(data.jobs||[]).map(j=>`<tr><td>${esc(human(j.action))}<span class="subtext">${esc(j.id)}</span></td><td>${badge(j.status)}</td><td>${esc(j.created_at)}</td><td>${esc(j.result||'')}</td></tr>`).join('');
+ const jobs=(data.jobs||[]).map(j=>`<tr><td>${esc(human(j.action))}<span class="subtext">${esc(j.id)}</span></td><td>${badge(j.status)}</td><td>${esc(historyTime(j.created_at))}</td><td>${esc(j.result||'')}</td></tr>`).join('');
  return panel('Operator console','Actions use the existing workflow gates. Select an action to see its fields.',`
  <form id="control-form" class="control-form">
  <label>Action<select id="control-action">${Object.entries(actions).map(([k,v])=>`<option value="${k}">${esc(v)}</option>`).join('')}</select></label>

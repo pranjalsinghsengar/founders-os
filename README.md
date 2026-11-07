@@ -1,5 +1,11 @@
 # Company OS — autonomous company workspace
 
+Backend repair checkpoint: project workspaces now support Python and TypeScript
+source. Workers receive actual file capabilities and can run Python syntax checks
+and offline Docker unittests. Python tests require a trusted local image pinned by
+image ID; no automatic image downloads, package installs or host credentials are
+provided during test execution. This is not deployment or full product certification.
+
 The intended distribution is a GitHub download that runs locally: detect installed
 AI CLIs, let the founder choose one, research an idea, obtain approval, then produce
 the product's source folder and a downloadable package. This architecture keeps
@@ -7,8 +13,8 @@ the orchestration application separate from each generated product.
 
 Local CLI discovery is available with `python company_cli.py ai-discover`.
 `python company_cli.py init --no-serve --ai codex` detects installed Codex/Claude
-and saves a preference. **Detection is working; CLI worker adapters and local
-authentication checks are not implemented. Workers still use the OpenAI API.**
+and saves a preference. **Codex employee, planner and review execution is implemented. Selection activates
+the CLI for new calls. Claude and CLI research evidence adapters remain missing.**
 
 Export existing approved product code with
 `python company_cli.py export-project PROJECT_ID`. The ZIP in ignored `exports/`

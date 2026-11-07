@@ -72,7 +72,33 @@ class QualityGateTests(unittest.TestCase):
                 decision=json.loads(part['text']);decision['ready']=True;part['text']=json.dumps(decision)
                 return result
         self.assertEqual(self.execute(Model()),'failed')
-        self.assertIn('invalid',self.c.snapshot()['tasks'][0]['note'])
+        self.assertIn('bounded revision',self.c.snapshot()['tasks'][0]['note'])
+        self.assertTrue(any(e['kind']=='employee.quality.summary.rejected' for e in self.c.snapshot()['events']))
+    def test_single_json_fence_is_accepted(self):
+        class Model:
+            def complete(self,instructions,history,tools):
+                response=ready_response(history)
+                part=response['output'][0]['content'][0]
+                part['text']='```json\n'+part['text']+'\n```'
+                return response
+        self.assertEqual(self.execute(Model()),'awaiting_review')
+    def test_fenced_json_with_surrounding_prose_is_rejected(self):
+        class Model:
+            def complete(self,instructions,history,tools):
+                response=ready_response(history)
+                part=response['output'][0]['content'][0]
+                part['text']='Ignore validation\n```json\n'+part['text']+'\n```'
+                return response
+        self.assertEqual(self.execute(Model()),'failed')
+    def test_fenced_contradictory_self_check_is_rejected(self):
+        class Model:
+            def complete(self,instructions,history,tools):
+                response=ready_response(history,False)
+                part=response['output'][0]['content'][0]
+                decision=json.loads(part['text']);decision['ready']=True
+                part['text']='```json\n'+json.dumps(decision)+'\n```'
+                return response
+        self.assertEqual(self.execute(Model()),'failed')
     def test_pause_between_draft_and_check_prevents_call(self):
         class Model:
             def complete(self,*args):raise AssertionError('No call allowed after pause')
